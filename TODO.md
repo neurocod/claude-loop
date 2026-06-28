@@ -93,15 +93,26 @@ Source: frankbria (`--backup` / `--rollback`).
 Optionally create a backup branch before each iteration so a bad iteration can
 be reverted. Lower value given push-forward workflow, but cheap insurance.
 
+## Deferred (revisit later — not now, but worth keeping on the radar)
+
+- **Setup wizard** (frankbria `ralph-enable`) — interactive bootstrap that
+  detects project type/framework and generates the loop's config + prompt/task
+  files. Overkill for two modes today; useful if the tool gets reused across
+  many projects.
+- **Queue system** (frankbria `ralph-queue`) — a persistent task queue
+  (`add`/`status`/`reorder`/`remove`, priorities, dependencies,
+  `--halt-on-failure`). Our `list.md` is a flat queue already; a richer queue
+  pays off only once tasks need ordering/dependencies.
+- **PRD import** (frankbria `ralph-import`) — turn a free-form requirements doc
+  (Markdown/txt/JSON/DOCX/PDF) into the loop's task/prompt files, with a
+  completeness score. We fill `TODO.md`/`currentState.md` by hand for now; if
+  wanted, a lightweight version is just a one-shot claude prompt, no DOCX/PDF
+  parser.
+- **`--worktree` isolation for parallel** (continuous-claude) — our parallel
+  workers write distinct `*.ru.md` files, so there is no conflict today. Needed
+  only if we ever parallelise edits to *code* (overlapping writes).
+
 ## Deliberately NOT doing (out of scope / wrong fit)
 
-- Full PR → CI-wait → merge lifecycle (continuous-claude) — too heavy; plain
-  `git push` is right for a prototype.
-- tmux dashboard (`--monitor`) — Windows-first; little value.
-- Docker / E2B sandbox, setup wizard, queue system, PRD import (frankbria) —
-  overkill for two modes.
-- `--worktree` isolation for parallel — our parallel workers write distinct
-  `*.ru.md` files, so there is no conflict. Revisit only if we ever parallelise
-  edits to *code*.
 - `--continue` session continuity — we deliberately use fresh context + files
   (the recommended Ralph pattern); don't switch to resuming sessions.
