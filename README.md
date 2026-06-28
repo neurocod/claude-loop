@@ -16,6 +16,47 @@ It ships two ready-made task shapes (and you can write your own `Driver`) = **St
   one at a time (or N at a time, see `run_parallel`), striking each out of the
   list once its command succeeds. Idempotent: stop any time and relaunch.
 
+The state machine is the headline shape. In essence the loop is just:
+
+```
+while (state != error)
+    claude -p "Follow instructions in currentState.md"
+	state = readStateFrom("currentState.md")
+```
+
+Its state file's first line names the current mode; each iteration runs that
+mode, then rewrites the line to point at the next one. The
+[`examples/currentState.md`](examples/currentState.md) playbook cycles like this:
+
+```
+         ┌──────────────────────────────────────────────┐
+         ▼  (loop back once the task is wrapped up)     │
+  ┌─────────────┐                                       │
+  │  plan mode  │  look around, pick a task,            │
+  │             │  fill currentTask.md                  │
+  └──────┬──────┘                                       │
+         ▼ task ready                                   │
+  ┌─────────────┐                                       │
+  │  implement  │ build it, write a self-test,          │
+  │             │  commit intermediate work             │
+  └──────┬──────┘                                       │
+         ▼ code written                                 │
+  ┌─────────────┐                                       │
+  │   cleanup   │  commit or revert, tidy comments,     │
+  │             │  update TODO / README                 │
+  └──────┬──────┘                                       │
+         │ task done                                    │
+         └──────────────────────────────────────────────┘
+
+  · · · from ANY state, on an unrecoverable problem · · ·
+                          │
+                          ▼
+                  ┌─────────────┐
+                  │    error    │  loop halts until a human
+                  │   (halt)    │  resets the state line
+                  └─────────────┘
+```
+
 Designed to be vendored as a **git submodule** under a host project. The code
 location and the project root are kept separate: the engine anchors every
 project-relative operation (git/claude cwd, the stop file, the relative paths a
@@ -88,38 +129,8 @@ python runFileList.py --dry-run  # print the commands, run nothing
 
 ### State-machine driver
 
-The state file's first line names the current mode; each iteration runs that
-mode, then rewrites the line to point at the next one. The
-[`examples/currentState.md`](examples/currentState.md) playbook cycles like this:
-
-```
-         ┌──────────────────────────────────────────────┐
-         ▼  (loop back once the task is wrapped up)     │
-  ┌─────────────┐                                       │
-  │  plan mode  │  look around, pick a task,            │
-  │             │  fill currentTask.md                  │
-  └──────┬──────┘                                       │
-         ▼ task ready                                   │
-  ┌─────────────┐                                       │
-  │  implement  │ build it, write a self-test,          │
-  │             │  commit intermediate work             │
-  └──────┬──────┘                                       │
-         ▼ code written                                 │
-  ┌─────────────┐                                       │
-  │   cleanup   │  commit or revert, tidy comments,     │
-  │             │  update TODO / README                 │
-  └──────┬──────┘                                       │
-         │ task done                                    │
-         └──────────────────────────────────────────────┘
-
-  · · · from ANY state, on an unrecoverable problem · · ·
-                          │
-                          ▼
-                  ┌─────────────┐
-                  │    error    │  loop halts until a human
-                  │   (halt)    │  resets the state line
-                  └─────────────┘
-```
+Drives the state machine shown in the diagram above — the state file's first
+line names the current mode, and `model_fn` picks the model per mode:
 
 ```python
 from claude_loop import StateFileDriver, parse_args, run_loop
