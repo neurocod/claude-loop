@@ -31,8 +31,6 @@ class FileListDriver(ListFileDriver):
     list_file = LIST_FILE_REL
     target_suffix = ".summary.md"  # output sibling: foo.py -> foo.summary.md
     source_ext = ""                # "" = append suffix; or e.g. ".py" to replace it
-    app_name = "runFileList"
-    prog = "runFileList.py"
     description = f"Process every file listed in {LIST_FILE_REL}, one per iteration."
 
     def model(self) -> str:

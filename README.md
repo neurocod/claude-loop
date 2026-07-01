@@ -101,8 +101,6 @@ from claude_loop import ListFileDriver
 class FileListDriver(ListFileDriver):
     list_file     = "files.md"
     target_suffix = ".summary.md"
-    app_name      = "runFileList"
-    prog          = "runFileList.py"
 
     def model(self):
         return "sonnet"   # or "" to use the CLI's own configured model
@@ -135,8 +133,6 @@ from claude_loop import StateFileDriver
 
 class CycleDriver(StateFileDriver):
     state_file = "currentState.md"
-    app_name   = "runCycle"
-    prog       = "runCycle.py"
 
     def model(self):
         return "opus"   # vary by self.first_line(), or "" for the CLI default
@@ -148,13 +144,13 @@ if __name__ == "__main__":
 ### Parallel work queue
 
 Any `ListFileDriver` subclass also runs concurrently via `.main_parallel()` — no
-extra code, just a different entry point (its own log/`--help` labels can be set
-by subclassing further):
+extra code, just a different entry point. Put it in its own wrapper file and the
+derived `app_name` / `prog` give it a separate log file and `--help` name for
+free:
 
 ```python
 class FileListParallelDriver(FileListDriver):
-    app_name = "runFileListParallel"
-    prog     = "runFileListParallel.py"
+    pass
 
 if __name__ == "__main__":
     FileListParallelDriver.main_parallel()

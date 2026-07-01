@@ -43,7 +43,9 @@ class StateFileDriver(Driver):
                      file whose first line is the current state.
       error_token    substring (case-insensitive) in the state line that aborts
                      the run for human intervention. Default: "error".
-      app_name / prog / description — the entry-point labels (see Driver).
+      app_name / prog / description — the entry-point labels; app_name and prog
+                     default to the wrapper's filename (see Driver), so usually
+                     only description (if any) is worth setting.
 
     Override methods to customise behaviour:
       prompt()  -> the instruction sent every iteration (default:
@@ -56,8 +58,6 @@ class StateFileDriver(Driver):
 
     state_file: str = "products/currentState.md"
     error_token: str = "error"
-    app_name = "runCycle"
-    prog = "runCycle.py"
 
     def _state_path(self) -> str:
         return _abs_in_project(self.state_file)
@@ -132,7 +132,9 @@ class ListFileDriver(Driver):
                      in it are skipped as already-done / self-referential.
       source_ext     source extension replaced by target_suffix when deriving the
                      target path (default ".md": foo.md -> foo<suffix>).
-      app_name / prog / description — the entry-point labels (see Driver).
+      app_name / prog / description — the entry-point labels; app_name and prog
+                     default to the wrapper's filename (see Driver), so usually
+                     only description (if any) is worth setting.
 
     Override `prompt(source_abs, target_abs)` (required — it builds the per-file
     instruction) and `model()` to pin/vary the model (default: "" — the CLI's own
@@ -146,8 +148,6 @@ class ListFileDriver(Driver):
     list_file: str = "products/list.md"
     target_suffix: str = ".ru.md"
     source_ext: str = ".md"
-    app_name = "runTranslate"
-    prog = "runTranslate.py"
 
     def __init__(self):
         self._current_line: Optional[str] = None  # raw list line being processed
@@ -243,5 +243,6 @@ class ListFileDriver(Driver):
         """
         from .parallel import run_parallel
         from .parallel import parse_args as parse_parallel_args
-        args = parse_parallel_args(argv, prog=cls.prog, description=cls.description)
-        run_parallel(cls(), args, app_name=cls.app_name)
+        args = parse_parallel_args(argv, prog=cls.resolved_prog(),
+                                   description=cls.description)
+        run_parallel(cls(), args, app_name=cls.resolved_app_name())

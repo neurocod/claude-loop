@@ -12,8 +12,6 @@ attributes / overridden methods — and calls its `.main()`:
     class TranslateDriver(ListFileDriver):
         list_file     = "products/list.md"
         target_suffix = ".ru.md"
-        app_name      = "runTranslate"
-        prog          = "runTranslate.py"
 
         def model(self):
             return "sonnet"     # or "" to use the CLI's own configured model

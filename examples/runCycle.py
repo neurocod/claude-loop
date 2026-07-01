@@ -30,8 +30,6 @@ STATE_FILE_REL = "currentState.md"
 
 class CycleDriver(StateFileDriver):
     state_file = STATE_FILE_REL
-    app_name = "runCycle"
-    prog = "runCycle.py"
     description = f"Autonomous loop driving the Claude CLI per {STATE_FILE_REL}."
 
     def model(self) -> str:

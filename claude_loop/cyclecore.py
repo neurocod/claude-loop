@@ -1120,8 +1120,12 @@ class Driver:
     A Driver is customised two ways, both declarative:
 
       * class attributes for the labels the entry points use — ``app_name``
-        (names the rotating mirror log), ``prog`` / ``description`` (the --help
-        text). Set them on your subclass.
+        (names the rotating mirror log) and ``prog`` (the --help program name)
+        both default to None and are then derived from the invoked script's
+        filename (runTranslate.py -> "runTranslate" / "runTranslate.py"), so a
+        typical wrapper need not set them at all; ``description`` (the --help
+        description) is free prose, so set it if you want one. Override any of
+        them on your subclass to pin an explicit value.
       * methods for behaviour — ``next_command()``, ``model()``, ``on_success()``,
         ``final_summary()``. Override the ones you need; the rest keep their
         default.
@@ -1142,9 +1146,29 @@ class Driver:
     """
 
     # --- labels used by the entry points (override on the subclass) -----------
-    app_name: str = "runCycle"          # names the rotating mirror log file
-    prog: str = "runCycle.py"           # --help program name
+    # None => derive from the invoked script's filename (see resolved_app_name /
+    # resolved_prog); set an explicit string to override.
+    app_name: Optional[str] = None      # names the rotating mirror log file
+    prog: Optional[str] = None          # --help program name
     description: Optional[str] = None   # --help description (None = generic)
+
+    @classmethod
+    def resolved_app_name(cls) -> str:
+        """The mirror-log label: ``app_name`` if set, else the invoked script's
+        filename stem (runTranslate.py -> "runTranslate"). Deriving it keeps each
+        entry point on its own log without the wrapper having to spell it out; the
+        fallback covers odd argv[0] values (e.g. ``-c``)."""
+        if cls.app_name:
+            return cls.app_name
+        return Path(sys.argv[0]).stem or "runCycle"
+
+    @classmethod
+    def resolved_prog(cls) -> str:
+        """The --help program name: ``prog`` if set, else the invoked script's
+        basename (runTranslate.py -> "runTranslate.py")."""
+        if cls.prog:
+            return cls.prog
+        return os.path.basename(sys.argv[0]) or "runCycle.py"
 
     def next_command(self) -> Optional[ClaudeCommand]:
         """The command to run this iteration, or None when work is exhausted and
@@ -1176,14 +1200,15 @@ class Driver:
     def main(cls, argv=None) -> None:
         """Parse the shared CLI and run the sequential loop over a fresh instance.
 
-        This is the whole body of a project wrapper: subclass, set the class
-        attributes / override the methods you need, then
-        ``if __name__ == "__main__": MyDriver.main()``. ``prog`` / ``description``
-        label the --help text and ``app_name`` names the log, all taken from the
-        (sub)class.
+        This is the whole body of a project wrapper: subclass, override the
+        methods you need, then ``if __name__ == "__main__": MyDriver.main()``.
+        ``prog`` labels the --help text and ``app_name`` names the log; both are
+        taken from the (sub)class or derived from the script filename when unset,
+        and ``description`` is the (optional) --help blurb.
         """
-        args = parse_args(argv, prog=cls.prog, description=cls.description)
-        run_loop(cls(), args, app_name=cls.app_name)
+        args = parse_args(argv, prog=cls.resolved_prog(),
+                          description=cls.description)
+        run_loop(cls(), args, app_name=cls.resolved_app_name())
 
 
 def run_loop(driver: Driver, args: argparse.Namespace,
