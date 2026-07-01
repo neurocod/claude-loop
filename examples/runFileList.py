@@ -7,9 +7,8 @@ source path per line; each iteration picks a still-pending path at random, runs
 the run is idempotent (stop any time and relaunch to pick up the rest).
 
 This particular example asks claude to write a short summary of each source file
-into a sibling `<name>.summary.md`. Swap `prompt()` / `target_suffix` /
-`default_model` for your own per-file task (generate docs, add license headers,
-refactor, lint…).
+into a sibling `<name>.summary.md`. Swap `prompt()` / `target_suffix` / `model()`
+for your own per-file task (generate docs, add license headers, refactor, lint…).
 
 Copy this into your host project root (next to the `tools/claude-loop`
 submodule), adjust the class attributes, and run `python runFileList.py`.
@@ -32,10 +31,14 @@ class FileListDriver(ListFileDriver):
     list_file = LIST_FILE_REL
     target_suffix = ".summary.md"  # output sibling: foo.py -> foo.summary.md
     source_ext = ""                # "" = append suffix; or e.g. ".py" to replace it
-    default_model = "sonnet"
     app_name = "runFileList"
     prog = "runFileList.py"
     description = f"Process every file listed in {LIST_FILE_REL}, one per iteration."
+
+    def model(self) -> str:
+        """A cheaper/faster model is enough for this mechanical task. Return "" to
+        let the CLI use its own configured model instead."""
+        return "sonnet"
 
     def prompt(self, source: str, target: str) -> str:
         """Instructions for a single file (receives absolute paths)."""

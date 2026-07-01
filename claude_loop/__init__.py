@@ -12,9 +12,11 @@ attributes / overridden methods — and calls its `.main()`:
     class TranslateDriver(ListFileDriver):
         list_file     = "products/list.md"
         target_suffix = ".ru.md"
-        default_model = "sonnet"
         app_name      = "runTranslate"
         prog          = "runTranslate.py"
+
+        def model(self):
+            return "sonnet"     # or "" to use the CLI's own configured model
 
         def prompt(self, source, target):
             return f"Translate {source} to Russian, write {target}, keep search: verbatim ..."

@@ -41,7 +41,6 @@ class StateFileDriver(Driver):
     Configure via class attributes on a subclass:
       state_file     relative (to the project root) or absolute path to the state
                      file whose first line is the current state.
-      default_model  the model used unless model() is overridden.
       error_token    substring (case-insensitive) in the state line that aborts
                      the run for human intervention. Default: "error".
       app_name / prog / description — the entry-point labels (see Driver).
@@ -49,13 +48,13 @@ class StateFileDriver(Driver):
     Override methods to customise behaviour:
       prompt()  -> the instruction sent every iteration (default:
                    "Follow the instructions in <state_file>").
-      model()   -> vary the model by state; read self.first_line() inside.
+      model()   -> pin a model, or vary it by state (read self.first_line()
+                   inside). Default: "" — the CLI's own configured model.
 
     Entry point: ``MyStateDriver.main()``.
     """
 
     state_file: str = "products/currentState.md"
-    default_model: str = "opus"
     error_token: str = "error"
     app_name = "runCycle"
     prog = "runCycle.py"
@@ -74,9 +73,6 @@ class StateFileDriver(Driver):
     def prompt(self) -> str:
         """The instruction sent every iteration. Override to change the playbook."""
         return f"Follow the instructions in {self.state_file}"
-
-    def model(self) -> str:
-        return self.default_model
 
     def next_command(self) -> Optional[ClaudeCommand]:
         state = self.first_line()
@@ -132,7 +128,6 @@ class ListFileDriver(Driver):
 
     Configure via class attributes on a subclass:
       list_file      relative (to the project root) or absolute path to the list.
-      default_model  the model used unless model() is overridden.
       target_suffix  output sibling suffix, e.g. ".ru.md"; lines already ending
                      in it are skipped as already-done / self-referential.
       source_ext     source extension replaced by target_suffix when deriving the
@@ -140,14 +135,15 @@ class ListFileDriver(Driver):
       app_name / prog / description — the entry-point labels (see Driver).
 
     Override `prompt(source_abs, target_abs)` (required — it builds the per-file
-    instruction) and `model()` if the model should vary.
+    instruction) and `model()` to pin/vary the model (default: "" — the CLI's own
+    configured model; mechanical work like translation often warrants a cheaper
+    one).
 
     Entry points: ``MyListDriver.main()`` (sequential), or
     ``MyListDriver.main_parallel()`` (N concurrent `claude` workers).
     """
 
     list_file: str = "products/list.md"
-    default_model: str = "sonnet"
     target_suffix: str = ".ru.md"
     source_ext: str = ".md"
     app_name = "runTranslate"
@@ -213,9 +209,6 @@ class ListFileDriver(Driver):
             return False
         _write_list_lines(list_path, lines)
         return True
-
-    def model(self) -> str:
-        return self.default_model
 
     def next_command(self) -> Optional[ClaudeCommand]:
         pending = self.pending_lines()

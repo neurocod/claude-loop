@@ -681,9 +681,12 @@ class ClaudeCommand(NamedTuple):
     """One unit of work for the loop: the prompt to send, the model to use, and a
     short label shown in the iteration header. Drivers build these in
     next_command(); build_claude_argv() turns one into the full `claude` argv.
+
+    An empty `model` means "no --model flag": the `claude` CLI then uses whatever
+    model it is configured to (its own default), which is the common case.
     """
     prompt: str
-    model: str
+    model: str = ""
     label: str = ""
 
 
@@ -692,11 +695,14 @@ def build_claude_argv(command: ClaudeCommand) -> list:
 
     The flags are identical for every task; only the prompt and the model vary,
     so this is the single place those two are spliced into the otherwise fixed
-    argv (stream-json + partial messages so the loop can render work live).
+    argv (stream-json + partial messages so the loop can render work live). An
+    empty `command.model` omits --model entirely, letting the CLI pick its own
+    configured default.
     """
-    return [
-        "claude", "-p", command.prompt,
-        "--model", command.model,
+    argv = ["claude", "-p", command.prompt]
+    if command.model:
+        argv += ["--model", command.model]
+    argv += [
         "--permission-mode", "acceptEdits",
         # tools allowed without interactive confirmation
         "--allowedTools", "Bash Edit Write Read Glob Grep WebFetch WebSearch",
@@ -706,6 +712,7 @@ def build_claude_argv(command: ClaudeCommand) -> list:
         # text deltas as they are generated (we print token by token)
         "--include-partial-messages",
     ]
+    return argv
 
 
 def _short(text: str, limit: int = 200) -> str:
@@ -1148,12 +1155,13 @@ class Driver:
         """The Claude model to drive this iteration's command.
 
         Called by next_command() implementations to fill in ClaudeCommand.model.
-        Override to pick a cheaper/faster model for mechanical work (e.g. a list
-        driver translating files needs less than the main state machine), or to
-        vary the model per iteration (read whatever state you like inside). The
-        default is the most capable model.
+        The default returns "" — no --model flag, so the `claude` CLI uses its
+        own configured model. Override this (the single model knob) to pin a
+        specific model, pick a cheaper/faster one for mechanical work (e.g. a
+        list driver translating files needs less than the main state machine), or
+        vary the model per iteration (read whatever state you like inside).
         """
-        return "opus"
+        return ""
 
     def on_success(self, returncode: int) -> None:
         """Called after an iteration whose `claude` exited 0 — record progress

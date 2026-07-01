@@ -10,8 +10,8 @@ with fresh context and picks up where the last one left off — the canonical
 
 A typical setup: `currentState.md` names the current phase, and your prompt tells
 claude to follow a playbook (e.g. read a TODO list, do one item, update the
-state). Override `model()` to vary the model by state if you like (or drop it and
-just set `default_model`).
+state). Override `model()` to pin or vary the model by state if you like; leave it
+alone to let the `claude` CLI use its own configured model.
 
 Copy this into your host project root (next to the `tools/claude-loop` submodule),
 adjust the class attributes, and run `python runCycle.py`.
@@ -30,14 +30,13 @@ STATE_FILE_REL = "currentState.md"
 
 class CycleDriver(StateFileDriver):
     state_file = STATE_FILE_REL
-    default_model = "opus"
     app_name = "runCycle"
     prog = "runCycle.py"
     description = f"Autonomous loop driving the Claude CLI per {STATE_FILE_REL}."
 
     def model(self) -> str:
-        """Choose the model from the current state (override as needed, or delete
-        this method to just use default_model)."""
+        """Choose the model from the current state. Override as needed, or delete
+        this method to let the CLI use its own configured model."""
         if "implementation" in self.first_line().lower():
             return "opus"
         return "opus"

@@ -101,9 +101,11 @@ from claude_loop import ListFileDriver
 class FileListDriver(ListFileDriver):
     list_file     = "files.md"
     target_suffix = ".summary.md"
-    default_model = "sonnet"
     app_name      = "runFileList"
     prog          = "runFileList.py"
+
+    def model(self):
+        return "sonnet"   # or "" to use the CLI's own configured model
 
     def prompt(self, source, target):
         return (f"Read {source} and write a Markdown summary to {target}. "
@@ -126,7 +128,7 @@ python runFileList.py --dry-run  # print the commands, run nothing
 
 Drives the state machine shown in the diagram above — the state file's first
 line names the current mode, and an overridden `model()` picks the model per mode
-(drop it to just use `default_model`):
+(drop it to let the CLI use its own configured model):
 
 ```python
 from claude_loop import StateFileDriver
@@ -137,7 +139,7 @@ class CycleDriver(StateFileDriver):
     prog       = "runCycle.py"
 
     def model(self):
-        return "opus"   # vary by self.first_line() if you like
+        return "opus"   # vary by self.first_line(), or "" for the CLI default
 
 if __name__ == "__main__":
     CycleDriver.main()
