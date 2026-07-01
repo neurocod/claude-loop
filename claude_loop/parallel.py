@@ -344,7 +344,7 @@ def run_parallel(driver: ListFileDriver, args: argparse.Namespace,
     print(f"  · logging to {cyclecore.log_file_path(app_name)}")
     print(f"  · jobs: {jobs}  ·  git push policy: {git_push_policy.value}")
 
-    list_file_rel = driver.list_file_rel
+    list_file_rel = driver.list_file
     pending_now = driver.pending_lines()
     if not pending_now:
         print(f"Nothing pending in {list_file_rel} — nothing to do.")

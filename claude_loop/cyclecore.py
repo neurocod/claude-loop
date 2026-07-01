@@ -1110,10 +1110,34 @@ class LoopStop(Exception):
 class Driver:
     """What the generic loop needs from a task. Subclass and override.
 
+    A Driver is customised two ways, both declarative:
+
+      * class attributes for the labels the entry points use — ``app_name``
+        (names the rotating mirror log), ``prog`` / ``description`` (the --help
+        text). Set them on your subclass.
+      * methods for behaviour — ``next_command()``, ``model()``, ``on_success()``,
+        ``final_summary()``. Override the ones you need; the rest keep their
+        default.
+
     The loop owns all the scaffolding (stop file, git push, usage limits,
     --max/--maxStrike, streaming render); the Driver only decides *what work to
-    do* via three hooks — see the module docstring.
+    do*. A project wrapper is then just::
+
+        class MyDriver(StateFileDriver):
+            state_file = "products/currentState.md"
+            app_name   = "runCycle"
+
+        if __name__ == "__main__":
+            MyDriver.main()
+
+    ``main()`` parses the shared CLI and hands a fresh instance to run_loop(); the
+    subclass never touches parse_args / run_loop by hand.
     """
+
+    # --- labels used by the entry points (override on the subclass) -----------
+    app_name: str = "runCycle"          # names the rotating mirror log file
+    prog: str = "runCycle.py"           # --help program name
+    description: Optional[str] = None   # --help description (None = generic)
 
     def next_command(self) -> Optional[ClaudeCommand]:
         """The command to run this iteration, or None when work is exhausted and
@@ -1125,9 +1149,9 @@ class Driver:
 
         Called by next_command() implementations to fill in ClaudeCommand.model.
         Override to pick a cheaper/faster model for mechanical work (e.g. a list
-        driver translating files needs less than the main state machine). The
-        default is the most capable model. Implementations may read whatever
-        state they like to vary the choice per iteration.
+        driver translating files needs less than the main state machine), or to
+        vary the model per iteration (read whatever state you like inside). The
+        default is the most capable model.
         """
         return "opus"
 
@@ -1139,6 +1163,19 @@ class Driver:
         """An optional closing line printed on the way out (after the final
         git push). Return None for no summary."""
         return None
+
+    @classmethod
+    def main(cls, argv=None) -> None:
+        """Parse the shared CLI and run the sequential loop over a fresh instance.
+
+        This is the whole body of a project wrapper: subclass, set the class
+        attributes / override the methods you need, then
+        ``if __name__ == "__main__": MyDriver.main()``. ``prog`` / ``description``
+        label the --help text and ``app_name`` names the log, all taken from the
+        (sub)class.
+        """
+        args = parse_args(argv, prog=cls.prog, description=cls.description)
+        run_loop(cls(), args, app_name=cls.app_name)
 
 
 def run_loop(driver: Driver, args: argparse.Namespace,

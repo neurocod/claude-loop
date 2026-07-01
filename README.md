@@ -87,8 +87,8 @@ git submodule add <repo-url> tools/claude-loop
 cp tools/claude-loop/examples/runFileList.py .   # then edit the constants
 ```
 
-A wrapper is tiny — it only supplies the project-specific bits and calls into the
-engine:
+A wrapper is tiny — subclass a Driver, set the project-specific bits as class
+attributes / an overridden `prompt()`, and call `.main()`:
 
 ```python
 # runFileList.py  (in your project root)
@@ -96,26 +96,21 @@ import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "tools", "claude-loop"))
 
-from claude_loop import ListFileDriver, parse_args, run_loop
+from claude_loop import ListFileDriver
 
-def build_prompt(source, target):
-    return (f"Read {source} and write a Markdown summary to {target}. "
-            f"Do not modify {source}.")
+class FileListDriver(ListFileDriver):
+    list_file     = "files.md"
+    target_suffix = ".summary.md"
+    default_model = "sonnet"
+    app_name      = "runFileList"
+    prog          = "runFileList.py"
 
-def main():
-    args = parse_args(prog="runFileList.py")
-    run_loop(
-        ListFileDriver(
-            list_file="files.md",
-            prompt_fn=build_prompt,
-            target_suffix=".summary.md",
-            model="sonnet",
-        ),
-        args, app_name="runFileList",
-    )
+    def prompt(self, source, target):
+        return (f"Read {source} and write a Markdown summary to {target}. "
+                f"Do not modify {source}.")
 
 if __name__ == "__main__":
-    main()
+    FileListDriver.main()
 ```
 
 Run it from the project root so the working directory is the project root (or
@@ -130,27 +125,37 @@ python runFileList.py --dry-run  # print the commands, run nothing
 ### State-machine driver
 
 Drives the state machine shown in the diagram above — the state file's first
-line names the current mode, and `model_fn` picks the model per mode:
+line names the current mode, and an overridden `model()` picks the model per mode
+(drop it to just use `default_model`):
 
 ```python
-from claude_loop import StateFileDriver, parse_args, run_loop
+from claude_loop import StateFileDriver
 
-def pick_model(state_first_line):
-    return "opus"
+class CycleDriver(StateFileDriver):
+    state_file = "currentState.md"
+    app_name   = "runCycle"
+    prog       = "runCycle.py"
 
-run_loop(StateFileDriver(state_file="currentState.md", model_fn=pick_model),
-         parse_args(prog="runCycle.py"), app_name="runCycle")
+    def model(self):
+        return "opus"   # vary by self.first_line() if you like
+
+if __name__ == "__main__":
+    CycleDriver.main()
 ```
 
 ### Parallel work queue
 
-```python
-from claude_loop import ListFileDriver, run_parallel, parse_parallel_args
+Any `ListFileDriver` subclass also runs concurrently via `.main_parallel()` — no
+extra code, just a different entry point (its own log/`--help` labels can be set
+by subclassing further):
 
-args = parse_parallel_args(prog="runFileListParallel.py")
-run_parallel(ListFileDriver(list_file="files.md",
-                            prompt_fn=build_prompt, model="sonnet"),
-             args, app_name="runFileListParallel")
+```python
+class FileListParallelDriver(FileListDriver):
+    app_name = "runFileListParallel"
+    prog     = "runFileListParallel.py"
+
+if __name__ == "__main__":
+    FileListParallelDriver.main_parallel()
 ```
 
 ## Common options

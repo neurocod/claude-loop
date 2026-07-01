@@ -17,7 +17,7 @@ root, set from --project-dir / cwd), so the same code drives any host project.
 
 import os
 import random
-from typing import Callable, Optional
+from typing import Optional
 
 from . import cyclecore
 from .cyclecore import ClaudeCommand, Driver, LoopStop
@@ -38,31 +38,30 @@ class StateFileDriver(Driver):
     it stops only on an `error` state — which aborts the run with exit code 1 —
     or via the usual stop file / Ctrl+C / --max.
 
-    Parameters:
-      state_file   relative (to the project root) or absolute path to the state
-                   file whose first line is the current state.
-      prompt       the instruction sent to claude every iteration. Defaults to
-                   "Follow the instructions in <state_file>".
-      model        the model to use, unless model_fn is given.
-      model_fn     optional callable(state_first_line) -> model name, to vary the
-                   model by state (e.g. a heavier model for an "implementation"
-                   state). Takes precedence over `model`.
-      error_token  substring (case-insensitive) in the state line that aborts the
-                   run for human intervention. Default: "error".
+    Configure via class attributes on a subclass:
+      state_file     relative (to the project root) or absolute path to the state
+                     file whose first line is the current state.
+      default_model  the model used unless model() is overridden.
+      error_token    substring (case-insensitive) in the state line that aborts
+                     the run for human intervention. Default: "error".
+      app_name / prog / description — the entry-point labels (see Driver).
+
+    Override methods to customise behaviour:
+      prompt()  -> the instruction sent every iteration (default:
+                   "Follow the instructions in <state_file>").
+      model()   -> vary the model by state; read self.first_line() inside.
+
+    Entry point: ``MyStateDriver.main()``.
     """
 
-    def __init__(self, state_file: str, prompt: Optional[str] = None,
-                 model: str = "opus",
-                 model_fn: Optional[Callable[[str], str]] = None,
-                 error_token: str = "error"):
-        self._state_file_rel = state_file
-        self._prompt = prompt or f"Follow the instructions in {state_file}"
-        self._model = model
-        self._model_fn = model_fn
-        self._error_token = error_token.lower()
+    state_file: str = "products/currentState.md"
+    default_model: str = "opus"
+    error_token: str = "error"
+    app_name = "runCycle"
+    prog = "runCycle.py"
 
     def _state_path(self) -> str:
-        return _abs_in_project(self._state_file_rel)
+        return _abs_in_project(self.state_file)
 
     def first_line(self) -> str:
         """First line of the state file (empty string if the file is missing)."""
@@ -72,22 +71,24 @@ class StateFileDriver(Driver):
         except FileNotFoundError:
             return ""
 
+    def prompt(self) -> str:
+        """The instruction sent every iteration. Override to change the playbook."""
+        return f"Follow the instructions in {self.state_file}"
+
     def model(self) -> str:
-        if self._model_fn is not None:
-            return self._model_fn(self.first_line())
-        return self._model
+        return self.default_model
 
     def next_command(self) -> Optional[ClaudeCommand]:
         state = self.first_line()
         # State-machine contract: on error we do not proceed.
-        if self._error_token in state.lower():
+        if self.error_token.lower() in state.lower():
             raise LoopStop(
                 f"State '{state}' — error detected. Stopping, "
                 f"human intervention required.",
                 exit_code=1,
             )
-        label = state or f"{self._state_file_rel} not found"
-        return ClaudeCommand(self._prompt, self.model(), label)
+        label = state or f"{self.state_file} not found"
+        return ClaudeCommand(self.prompt(), self.model(), label)
 
     def final_summary(self) -> Optional[str]:
         return f"Final state: {self.first_line()}"
@@ -129,35 +130,40 @@ class ListFileDriver(Driver):
     pending. A failed iteration leaves its line in the list (on_success is what
     strikes it), so it gets retried on some later iteration.
 
-    Parameters:
-      list_file       relative (to the project root) or absolute path to the list.
-      prompt_fn       callable(source_abs, target_abs) -> prompt for one file.
-                      Receives absolute paths.
-      model           the model to drive each command.
-      target_suffix   output sibling suffix, e.g. ".ru.md"; lines already ending
-                      in it are skipped as already-done / self-referential.
-      source_ext      source extension replaced by target_suffix when deriving
-                      the target path (default ".md": foo.md -> foo<suffix>).
+    Configure via class attributes on a subclass:
+      list_file      relative (to the project root) or absolute path to the list.
+      default_model  the model used unless model() is overridden.
+      target_suffix  output sibling suffix, e.g. ".ru.md"; lines already ending
+                     in it are skipped as already-done / self-referential.
+      source_ext     source extension replaced by target_suffix when deriving the
+                     target path (default ".md": foo.md -> foo<suffix>).
+      app_name / prog / description — the entry-point labels (see Driver).
+
+    Override `prompt(source_abs, target_abs)` (required — it builds the per-file
+    instruction) and `model()` if the model should vary.
+
+    Entry points: ``MyListDriver.main()`` (sequential), or
+    ``MyListDriver.main_parallel()`` (N concurrent `claude` workers).
     """
 
-    def __init__(self, list_file: str,
-                 prompt_fn: Callable[[str, str], str],
-                 model: str = "sonnet",
-                 target_suffix: str = ".ru.md",
-                 source_ext: str = ".md"):
-        self._list_file_rel = list_file
-        self._prompt_fn = prompt_fn
-        self._model = model
-        self._target_suffix = target_suffix
-        self._source_ext = source_ext
+    list_file: str = "products/list.md"
+    default_model: str = "sonnet"
+    target_suffix: str = ".ru.md"
+    source_ext: str = ".md"
+    app_name = "runTranslate"
+    prog = "runTranslate.py"
+
+    def __init__(self):
         self._current_line: Optional[str] = None  # raw list line being processed
 
-    def list_path(self) -> str:
-        return _abs_in_project(self._list_file_rel)
+    def prompt(self, source: str, target: str) -> str:
+        """The per-file instruction (receives absolute paths). Override this — it
+        is the one project-specific piece a list driver must supply."""
+        raise NotImplementedError(
+            "ListFileDriver subclasses must override prompt(source, target)")
 
-    @property
-    def list_file_rel(self) -> str:
-        return self._list_file_rel
+    def list_path(self) -> str:
+        return _abs_in_project(self.list_file)
 
     def is_pending(self, line: str) -> bool:
         """A list line that still names a file to process (skips blanks, `#`
@@ -165,15 +171,15 @@ class ListFileDriver(Driver):
         s = line.strip()
         if not s or s.startswith("#"):
             return False
-        if s.lower().endswith(self._target_suffix.lower()):
+        if s.lower().endswith(self.target_suffix.lower()):
             return False
         return True
 
     def target_path(self, source: str) -> str:
         """`<name><target_suffix>` derived from the source path."""
-        if source.lower().endswith(self._source_ext.lower()):
-            return source[: -len(self._source_ext)] + self._target_suffix
-        return source + self._target_suffix
+        if source.lower().endswith(self.source_ext.lower()):
+            return source[: -len(self.source_ext)] + self.target_suffix
+        return source + self.target_suffix
 
     def pending_lines(self) -> list:
         """All raw list lines still naming work to do (re-read each call)."""
@@ -187,8 +193,8 @@ class ListFileDriver(Driver):
         source_abs = _abs_in_project(source)
         target_abs = self.target_path(source_abs)
         label = os.path.basename(source_abs)
-        return ClaudeCommand(self._prompt_fn(source_abs, target_abs),
-                             self._model, label)
+        return ClaudeCommand(self.prompt(source_abs, target_abs),
+                             self.model(), label)
 
     def strike(self, line: str) -> bool:
         """Remove the first list entry exactly matching `line`; rewrite the file.
@@ -209,7 +215,7 @@ class ListFileDriver(Driver):
         return True
 
     def model(self) -> str:
-        return self._model
+        return self.default_model
 
     def next_command(self) -> Optional[ClaudeCommand]:
         pending = self.pending_lines()
@@ -230,5 +236,19 @@ class ListFileDriver(Driver):
     def final_summary(self) -> Optional[str]:
         remaining = len(self.pending_lines())
         if remaining == 0:
-            return f"All items done — {self._list_file_rel} is empty."
-        return f"{remaining} item(s) still pending in {self._list_file_rel}."
+            return f"All items done — {self.list_file} is empty."
+        return f"{remaining} item(s) still pending in {self.list_file}."
+
+    @classmethod
+    def main_parallel(cls, argv=None) -> None:
+        """Parse the parallel CLI (adds -j/--jobs) and drain the list with N
+        concurrent `claude` workers over a fresh instance.
+
+        The parallel counterpart of Driver.main(): a wrapper for the concurrent
+        runner is just a subclass calling this. Imported lazily so drivers.py and
+        parallel.py don't form an import cycle.
+        """
+        from .parallel import run_parallel
+        from .parallel import parse_args as parse_parallel_args
+        args = parse_parallel_args(argv, prog=cls.prog, description=cls.description)
+        run_parallel(cls(), args, app_name=cls.app_name)

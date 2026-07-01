@@ -10,10 +10,11 @@ with fresh context and picks up where the last one left off — the canonical
 
 A typical setup: `currentState.md` names the current phase, and your prompt tells
 claude to follow a playbook (e.g. read a TODO list, do one item, update the
-state). Use `model_fn` to vary the model by state if you like.
+state). Override `model()` to vary the model by state if you like (or drop it and
+just set `default_model`).
 
 Copy this into your host project root (next to the `tools/claude-loop` submodule),
-adjust the constants, and run `python runCycle.py`.
+adjust the class attributes, and run `python runCycle.py`.
 """
 
 import os
@@ -22,26 +23,25 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "tools", "claude-loop"))
 
-from claude_loop import StateFileDriver, parse_args, run_loop
+from claude_loop import StateFileDriver
 
 STATE_FILE_REL = "currentState.md"
 
 
-def pick_model(state_first_line: str) -> str:
-    """Choose the model from the current state (override as needed)."""
-    if "implementation" in state_first_line.lower():
+class CycleDriver(StateFileDriver):
+    state_file = STATE_FILE_REL
+    default_model = "opus"
+    app_name = "runCycle"
+    prog = "runCycle.py"
+    description = f"Autonomous loop driving the Claude CLI per {STATE_FILE_REL}."
+
+    def model(self) -> str:
+        """Choose the model from the current state (override as needed, or delete
+        this method to just use default_model)."""
+        if "implementation" in self.first_line().lower():
+            return "opus"
         return "opus"
-    return "opus"
-
-
-def main():
-    args = parse_args(
-        prog="runCycle.py",
-        description=f"Autonomous loop driving the Claude CLI per {STATE_FILE_REL}.",
-    )
-    driver = StateFileDriver(state_file=STATE_FILE_REL, model_fn=pick_model)
-    run_loop(driver, args, app_name="runCycle")
 
 
 if __name__ == "__main__":
-    main()
+    CycleDriver.main()

@@ -2,21 +2,25 @@
 claude_loop - a reusable engine for autonomous Claude-CLI loops.
 
 Vendor this package as a git submodule under a host project, then write a thin
-wrapper in the project that supplies the project-specific bits (which file to
-read, which prompt to send, which model to use) and calls into here:
+wrapper in the project that subclasses a Driver — supplying the project-specific
+bits (which file to read, which prompt to send, which model to use) as class
+attributes / overridden methods — and calls its `.main()`:
 
     # runTranslate.py (thin wrapper in the host project root)
-    from claude_loop import ListFileDriver, parse_args, run_loop
+    from claude_loop import ListFileDriver
 
-    RULES = "Translate {src} to Russian, write {dst}, keep search: verbatim ..."
+    class TranslateDriver(ListFileDriver):
+        list_file     = "products/list.md"
+        target_suffix = ".ru.md"
+        default_model = "sonnet"
+        app_name      = "runTranslate"
+        prog          = "runTranslate.py"
 
-    def main():
-        args = parse_args(prog="runTranslate.py")
-        run_loop(ListFileDriver(list_file="products/list.md",
-                                target_suffix=".ru.md",
-                                prompt_fn=lambda s, d: RULES.format(src=s, dst=d),
-                                model="sonnet"),
-                 args, app_name="runTranslate")
+        def prompt(self, source, target):
+            return f"Translate {source} to Russian, write {target}, keep search: verbatim ..."
+
+    if __name__ == "__main__":
+        TranslateDriver.main()          # or .main_parallel() for N concurrent workers
 
 The engine anchors every project-relative operation (git/claude cwd, the stop
 file, the Driver's relative paths) to the project root — the current working
