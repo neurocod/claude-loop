@@ -27,8 +27,14 @@ file, the Driver's relative paths) to the project root — the current working
 directory by default, or --project-dir / set_project_root(). So the code can
 live in a submodule subdirectory while still driving the host project's repo.
 
+Pick a usage-limit specialisation with a Driver's `limit_policy` attribute, e.g.
+`LimitPolicy([SessionLimit(80)])`, `LimitPolicy([WeeklyLimit(90)])`, or a
+composite `LimitPolicy([DayNightLimit(), WeeklyLimit(90)])`; unset defaults to a
+day/night session rule.
+
 See cyclecore for the engine and the Driver protocol, drivers for the two ready
-made Drivers, and parallel for the concurrent list runner.
+made Drivers, parallel for the concurrent list runner, usage for the /usage
+query/parse layer and limits for the pausing policy.
 """
 
 from .cyclecore import (
@@ -36,7 +42,6 @@ from .cyclecore import (
     Driver,
     GitPushPolicy,
     LoopStop,
-    UsageComputer,
     build_claude_argv,
     log_file_path,
     parse_args,
@@ -45,23 +50,41 @@ from .cyclecore import (
     run_loop,
     set_project_root,
 )
+from .usage import Usage, UsageReading, UsageSource, parse_usage
+from .limits import (
+    DayNightLimit,
+    LimitPolicy,
+    LimitRule,
+    SessionLimit,
+    WeeklyLimit,
+    default_policy,
+)
 from .drivers import ListFileDriver, StateFileDriver
 from .parallel import run_parallel
 from .parallel import parse_args as parse_parallel_args
 
 __all__ = [
     "ClaudeCommand",
+    "DayNightLimit",
     "Driver",
     "GitPushPolicy",
+    "LimitPolicy",
+    "LimitRule",
     "ListFileDriver",
     "LoopStop",
+    "SessionLimit",
     "StateFileDriver",
-    "UsageComputer",
+    "Usage",
+    "UsageReading",
+    "UsageSource",
+    "WeeklyLimit",
     "build_claude_argv",
+    "default_policy",
     "log_file_path",
     "parse_args",
     "parse_parallel_args",
     "parse_duration",
+    "parse_usage",
     "project_dir",
     "run_loop",
     "run_parallel",

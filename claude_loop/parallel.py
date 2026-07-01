@@ -36,10 +36,10 @@ import time
 from typing import Optional
 
 from . import cyclecore
+from . import limits
 from .cyclecore import (
     ClaudeCommand,
     GitPushPolicy,
-    UsageComputer,
     build_claude_argv,
     git_push,
     git_unpushed_count,
@@ -49,6 +49,7 @@ from .cyclecore import (
     _describe_tool,
     _short,
 )
+from .usage import UsageSource
 from .drivers import ListFileDriver
 
 # Default worker count. The work is cheap and fully independent, so a handful of
@@ -261,13 +262,14 @@ class Shared:
 
 # --- worker loop ---------------------------------------------------------------
 
-def worker(job_id: int, shared: Shared, usage: Optional[UsageComputer],
-           session_start_box: list, usage_lock: threading.Lock) -> None:
+def worker(job_id: int, shared: Shared, source: Optional[UsageSource],
+           policy, session_start_box: list, usage_lock: threading.Lock) -> None:
     """One worker thread: claim -> (usage gate) -> run -> record, repeat.
 
     Loops until the shared stop flag is set (queue drained, --max hit, or stop
     file). A claim that returns None with the flag still clear means everything
-    left is in flight elsewhere, so we briefly back off and retry.
+    left is in flight elsewhere, so we briefly back off and retry. `source`/`policy`
+    are None when --ignore-usage disables the session-limit gate.
     """
     while not shared.stop.is_set():
         if os.path.exists(cyclecore.STOP_FILE):
@@ -283,11 +285,11 @@ def worker(job_id: int, shared: Shared, usage: Optional[UsageComputer],
         # Session-limit gate: one worker checks at a time (cheap, /usage is
         # TTL-cached), and a pause blocks every worker that reaches it — so the
         # whole fleet idles together when the budget is spent.
-        if usage is not None:
+        if source is not None:
             with usage_lock:
                 if not shared.stop.is_set():
-                    paused, new_start = usage.check_usage_and_maybe_wait(
-                        session_start_box[0])
+                    paused, new_start = policy.check_and_wait(
+                        source, session_start_box[0])
                     if paused:
                         session_start_box[0] = new_start
 
@@ -359,12 +361,16 @@ def run_parallel(driver: ListFileDriver, args: argparse.Namespace,
             print("  " + " ".join(build_claude_argv(driver.command_for(line))))
         return
 
-    usage = None if args.ignore_usage else UsageComputer()
+    # Usage gate: a shared UsageSource (query/cache) plus the Driver's LimitPolicy
+    # (which quotas to gate on). --ignore-usage turns both off.
+    source = None if args.ignore_usage else UsageSource()
+    policy = None if args.ignore_usage else (
+        driver.limit_policy or limits.default_policy())
     usage_lock = threading.Lock()
     session_start_box = [time.time()]  # shared, refreshed when a window resets
 
-    if usage is not None:
-        usage.log_usage_snapshot("at start (parallel)")
+    if source is not None:
+        policy.log_snapshot(source, "at start (parallel)")
 
     shared = Shared(driver, args.max)
 
@@ -381,7 +387,8 @@ def run_parallel(driver: ListFileDriver, args: argparse.Namespace,
 
     threads = [
         threading.Thread(target=worker, name=f"job{j}",
-                         args=(j, shared, usage, session_start_box, usage_lock),
+                         args=(j, shared, source, policy, session_start_box,
+                               usage_lock),
                          daemon=True)
         for j in range(1, jobs + 1)
     ]
@@ -418,8 +425,8 @@ def run_parallel(driver: ListFileDriver, args: argparse.Namespace,
         else:
             print("  · final git push: nothing to push.")
 
-    if usage is not None:
-        usage.log_usage_snapshot("at end (parallel)", cache_value=False)
+    if source is not None:
+        policy.log_snapshot(source, "at end (parallel)", cache_value=False)
 
     remaining = len(driver.pending_lines())
     print(f"\nProcessed {shared.done} file(s) this run; "

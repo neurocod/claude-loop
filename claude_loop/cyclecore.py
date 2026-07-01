@@ -29,11 +29,11 @@ which model to pick) factored out into the Driver protocol.
 
 Token-limit handling is driven by the CLI's own usage report rather than guessed
 from error counts. Before each iteration, and again immediately after any
-non-zero `claude` exit, the loop runs `claude -p "/usage"` and parses the
-*Current session* percentage. If that figure is at or above the usable ceiling
-for right now, the loop pauses; when the window reset time can't be parsed it
-falls back to waiting out a 5-hour window and then resumes fresh. See
-UsageComputer / dynamic_usage_limit for the full policy.
+non-zero `claude` exit, the loop asks the Driver's `limit_policy` to consult
+`claude -p "/usage"` and pause if any watched quota is at/over its ceiling. The
+querying/parsing lives in usage.py (UsageSource) and the pausing policy in
+limits.py (LimitPolicy and the ready-made SessionLimit / DayNightLimit /
+WeeklyLimit rules); this module only wires them into the loop.
 """
 
 import argparse
@@ -50,33 +50,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:  # Python < 3.9 or missing tz database
-    ZoneInfo = None
-
 # Claude sessions last ~5 hours; after a token-limit error we wait out that window.
 CLAUDE_SESSION_DURATION = 5 * 60 * 60 + 3  # 5 hours as seconds and + 3s as a safety margin
 SESSION_DURATION = 3600 # or: if session is started at the end of a window, it may continue more from the start next time
 LIMIT_RETRY_THRESHOLD = CLAUDE_SESSION_DURATION
 
-# How full the "Current session" (from `claude -p "/usage"`) is allowed to get
-# before the loop pauses. The ceiling depends on the time of day — see
-# session_usage_limit(): at night the leftover budget would just be wasted while
-# we're asleep, so we may burn almost the whole session; during the day we keep a
-# reserve for other work.
-NIGHT_USAGE_LIMIT = 95          # % — overnight, when leftover budget is wasted
-DAY_USAGE_LIMIT = 95            # % — daytime, keep a reserve for other work
-NIGHT_RESET_DEADLINE_HOUR = 10  # the "morning" boundary: 10:00 local time
-
-# Empirically, on this plan and these typical tasks, the session budget is spent
-# at roughly this rate per minute of active work. Near the end of a window the
-# unused budget would be wasted anyway, and we physically cannot overspend it:
-# with T minutes left we can burn at most USAGE_RATE_PER_MIN * T %. So once the
-# day/night base limit is reached we stop pausing all the way to the reset and
-# instead let the usable ceiling rise toward 100% as the window winds down — see
-# dynamic_usage_limit().
-USAGE_RATE_PER_MIN = 1.5        # % of the session budget spent per minute of work
+# The usage-limit policy (which /usage quota to gate on, what ceiling to allow,
+# when to pause) lives in limits.py / usage.py, chosen per project via a Driver's
+# `limit_policy` attribute — see Driver and run_loop.
 
 
 class GitPushPolicy(Enum):
@@ -359,322 +340,6 @@ def maybe_git_push(policy: GitPushPolicy, last_push: float) -> float:
         return now
 
     return last_push
-
-
-class SessionUsage(NamedTuple):
-    """Parsed result of `claude -p "/usage"` for the *Current session* line.
-
-    `percent` is the "NN% used" figure (None if it couldn't be found);
-    `reset_ts` is the epoch time the session window resets (None if not parsed).
-    """
-    percent: Optional[float]
-    reset_ts: Optional[float]
-
-
-_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun",
-     "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-
-
-def parse_session_usage(text: str) -> SessionUsage:
-    """Extract the Current-session percentage and reset time from /usage output.
-
-    Looks for a line like:
-        Current session: 44% used · resets Jun 24, 3:30am (Europe/Kiev)
-    """
-    percent = None
-    m = re.search(r"current session:\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
-    if m:
-        percent = float(m.group(1))
-
-    reset_ts = None
-    r = re.search(
-        r"current session:[^\n]*?resets\s+([A-Za-z]{3,})\s+(\d{1,2}),\s*"
-        r"(\d{1,2}):(\d{2})\s*([ap]m)\s*(?:\(([^)]+)\))?",
-        text, re.IGNORECASE,
-    )
-    if r:
-        mon_s, day_s, hour_s, min_s, ampm, zone = r.groups()
-        month = _MONTHS.get(mon_s[:3].lower())
-        if month:
-            hour = int(hour_s) % 12
-            if ampm.lower() == "pm":
-                hour += 12
-            tz = None
-            if zone and ZoneInfo is not None:
-                try:
-                    tz = ZoneInfo(zone.strip())
-                except Exception:
-                    tz = None
-            now = datetime.now(tz)
-            try:
-                dt = datetime(now.year, month, int(day_s), hour, int(min_s),
-                              tzinfo=tz)
-                ts = dt.timestamp()
-                # Guard the year boundary: a reset is always in the near future,
-                # so if it parsed to the distant past, it belongs to next year.
-                if ts < now.timestamp() - 24 * 3600:
-                    ts = dt.replace(year=now.year + 1).timestamp()
-                reset_ts = ts
-            except ValueError:
-                reset_ts = None
-
-    return SessionUsage(percent, reset_ts)
-
-
-def usage_summary_lines(text: str) -> list:
-    """The 'Current session' / 'Current week (...)' lines from /usage output, in
-    order and whitespace-normalised.
-
-    These carry the session percentage and the weekly-limit figures, e.g.:
-        Current session: 8% used · resets Jun 27, 5:50pm (Europe/Kiev)
-        Current week (all models): 73% used · resets Jul 1, 4pm (Europe/Kiev)
-        Current week (Sonnet only): 0% used
-    We log them verbatim at the start and end of a run. Returns [] if none match.
-    """
-    out = []
-    for line in text.splitlines():
-        s = line.strip()
-        if re.match(r"current (session|week)\b", s, re.IGNORECASE):
-            out.append(" ".join(s.split()))
-    return out
-
-
-def session_usage_limit(reset_ts: Optional[float], now: datetime = None) -> int:
-    """Allowed Current-session usage (%) before pausing, depending on the time.
-
-    At night the unused budget is simply wasted while we sleep, so we may run the
-    session almost to the wall; in the daytime we leave a reserve for other work.
-
-    Rule: if the current local time is in the small hours (after midnight, before
-    NIGHT_RESET_DEADLINE_HOUR:00) *and* the session resets no later than
-    NIGHT_RESET_DEADLINE_HOUR:00 (i.e. it refreshes in the morning while we're
-    likely still asleep), allow up to NIGHT_USAGE_LIMIT (98%). Otherwise cap at
-    DAY_USAGE_LIMIT (75%).
-    """
-    if now is None:
-        now = datetime.now()
-    # After midnight and before the morning boundary (00:00–09:59 local).
-    after_midnight = now.hour < NIGHT_RESET_DEADLINE_HOUR
-    # The session's reset clock-time is at or before the morning boundary.
-    resets_by_morning = False
-    if reset_ts is not None:
-        reset_dt = datetime.fromtimestamp(reset_ts)
-        resets_by_morning = (
-            reset_dt.hour * 60 + reset_dt.minute <= NIGHT_RESET_DEADLINE_HOUR * 60
-        )
-    if after_midnight and resets_by_morning:
-        return NIGHT_USAGE_LIMIT
-    return DAY_USAGE_LIMIT
-
-
-def dynamic_usage_limit(base_limit: int, reset_ts: Optional[float],
-                        now: Optional[float] = None) -> float:
-    """Usable Current-session ceiling (%) given the day/night base limit and how
-    close the window is to resetting.
-
-    The base limit (session_usage_limit) keeps a reserve for other work, but that
-    reserve is only worth protecting while the window lasts. With `minutes` left
-    we can spend at most USAGE_RATE_PER_MIN * minutes more, so any usage above
-    100 - USAGE_RATE_PER_MIN * minutes can never actually be reached before the
-    reset and is safe to release. The ceiling is therefore
-    max(base_limit, 100 - rate * minutes), capped at 100. It equals the base
-    limit until the window is within (100 - base_limit) / rate minutes of its
-    reset, then climbs toward 100%. With no known reset time we keep the base
-    limit unchanged (we can't reason about the remaining minutes).
-    """
-    if reset_ts is None:
-        return float(base_limit)
-    if now is None:
-        now = time.time()
-    minutes = max(0.0, (reset_ts - now) / 60.0)
-    return min(100.0, max(float(base_limit), 100.0 - USAGE_RATE_PER_MIN * minutes))
-
-
-# `claude -p "/usage"` is itself a CLI round-trip, so we don't want to fire it on
-# every loop turn. When caching is enabled the last reading is reused for up to
-# USAGE_CACHE_TTL seconds, so the CLI is queried at most once per window.
-USAGE_CACHE_TTL = 120  # seconds — at most one /usage query per 2 minutes
-
-
-class UsageComputer:
-    """Queries, caches and acts on the Claude "Current session" usage figure.
-
-    Bundles together:
-      * `query_usage_text` — the raw `claude -p "/usage"` round-trip;
-      * a TTL cache over the raw text (`get_usage_text` / `invalidate_cache`), so
-        the CLI is hit at most once per `cache_ttl` seconds and a single reading
-        serves both the session-percentage parse (`get_session_usage`) and the
-        snapshot log (`log_usage_snapshot`);
-      * `check_usage_and_maybe_wait` — the policy that pauses the loop until the
-        window resets once the session is at/over the allowed limit.
-    """
-
-    def __init__(self, cache_ttl: float = USAGE_CACHE_TTL):
-        self.cache_ttl = cache_ttl
-        self._cached_text: Optional[str] = None  # last raw /usage output
-        self._cached_ts: float = 0.0
-
-    def query_usage_text(self) -> str:
-        """Run `claude -p "/usage"` and return its raw stdout (empty on failure).
-
-        The single CLI round-trip behind both query_session_usage (which parses
-        the Current-session figure) and log_usage_snapshot (which logs the
-        session + weekly lines).
-        """
-        try:
-            proc = subprocess.run(
-                ["claude", "-p", "/usage"],
-                cwd=PROJECT_DIR,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=120,
-            )
-        except FileNotFoundError:
-            print("  · could not query /usage: 'claude' not found on PATH.")
-            return ""
-        except subprocess.TimeoutExpired:
-            print("  · could not query /usage: the command timed out.")
-            return ""
-        return proc.stdout or ""
-
-    def get_usage_text(self, cache_value: bool = True) -> str:
-        """Return the raw /usage output, reusing a cached reading when fresh.
-
-        With `cache_value` True (the default) text younger than `cache_ttl` is
-        returned without invoking the CLI again; otherwise (or once the cache is
-        stale) `query_usage_text` is called and the result cached. Pass
-        `cache_value=False` to force a fresh reading. A failed query (empty text)
-        is not cached, so the next call retries instead of being stuck on it.
-        """
-        now = time.time()
-        if (cache_value and self._cached_text is not None
-                and now - self._cached_ts < self.cache_ttl):
-            return self._cached_text
-        text = self.query_usage_text()
-        if text:
-            self._cached_text = text
-            self._cached_ts = now
-        return text
-
-    def get_session_usage(self, cache_value: bool = True) -> SessionUsage:
-        """Return the Current-session usage, reusing a cached reading when fresh.
-
-        Parses the (possibly cached) raw /usage text from get_usage_text, so it
-        shares the single CLI round-trip with log_usage_snapshot. Returns an
-        all-None SessionUsage when the output has no recognisable session line.
-        """
-        return parse_session_usage(self.get_usage_text(cache_value))
-
-    def log_usage_snapshot(self, label: str = "", cache_value: bool = True) -> None:
-        """Log the Current-session and Current-week ('weekly limit') usage lines.
-
-        Called at the run's bookends — before iteration 1 and after the last
-        cycle — so every run records where it started and finished against the
-        session and weekly limits (see usage_summary_lines). Goes through the same
-        cached get_usage_text, so the start snapshot primes the cache that the
-        first iteration's limit check then reuses (one CLI call, not two).
-        """
-        head = f"  · usage {label}".rstrip() + ":"
-        lines = usage_summary_lines(self.get_usage_text(cache_value))
-        if not lines:
-            print(f"{head} (no Current-session/week figures in /usage output)")
-            return
-        print(head)
-        for ln in lines:
-            print(f"      {ln}")
-
-    def invalidate_cache(self) -> None:
-        """Drop the cached /usage reading (e.g. after waiting out a window, when
-        the old percentage is no longer meaningful)."""
-        self._cached_text = None
-        self._cached_ts = 0.0
-
-    def check_usage_and_maybe_wait(self, session_start: float, note: str = "",
-                                   cache_value: bool = True) -> tuple:
-        """Query /usage; if the Current session is at/over the usable ceiling for
-        right now, pause until either the ceiling rises above it (the window is
-        nearing its reset — see dynamic_usage_limit) or the window refreshes.
-
-        While the day/night base limit (session_usage_limit) is not yet reached
-        the loop runs exactly as before. Once it is, the usable ceiling climbs
-        toward 100% as the reset approaches, so instead of idling all the way to
-        the reset we re-check each minute and resume the moment the ceiling
-        overtakes our usage — reclaiming budget that would otherwise be wasted.
-
-        With `cache_value` True (default) the underlying /usage call is throttled
-        to at most once per `cache_ttl` seconds via get_session_usage; pass False
-        to force a fresh reading.
-
-        Returns (paused, session_start). `session_start` is refreshed to now only
-        when the window actually reset, so callers can reset their per-session
-        bookkeeping; on a within-window resume it is returned unchanged.
-        """
-        usage = self.get_session_usage(cache_value)
-        if usage.percent is None:
-            print(f"  · /usage returned no Current-session percentage{note}.")
-            return False, session_start
-        base = session_usage_limit(usage.reset_ts)
-        limit = dynamic_usage_limit(base, usage.reset_ts)
-        print(f"  · Current session usage: {usage.percent:.0f}% "
-              f"(usable ceiling {limit:.0f}% now, base {base}%){note}")
-        if usage.percent < limit:
-            return False, session_start
-        return self._wait_over_limit(usage, base, session_start)
-
-    def _wait_over_limit(self, usage: SessionUsage, base: int,
-                         session_start: float) -> tuple:
-        """Hold while the Current session is over the usable ceiling.
-
-        Called once usage has reached the ceiling. Each minute we recompute the
-        ceiling from the *cached* percentage — we are not burning tokens while
-        paused, so the reading stays valid and there is no need to re-run
-        `claude -p "/usage"` — using the advancing clock. The ceiling rises as
-        the window nears its reset (dynamic_usage_limit); we resume the instant it
-        overtakes our usage, or once the window has fully reset.
-
-        Returns (True, session_start): unchanged session_start on a within-window
-        resume, or a fresh now if the window reset.
-        """
-        reset_ts = usage.reset_ts
-        if reset_ts is None:
-            # No reset time to reason about — fall back to a full-window wait.
-            target_ts = time.time() + CLAUDE_SESSION_DURATION
-            wait_until(target_ts,
-                       reason=f"Current session at {usage.percent:.0f}% "
-                              f"(>= {base}% allowed) and no reset time known — "
-                              f"pausing until {_fmt_clock(target_ts)} "
-                              f"(assumed session window reset)…")
-            self.invalidate_cache()
-            return True, time.time()
-
-        print(f"  ⏳ Current session at {usage.percent:.0f}% (base limit {base}%) "
-              f"— holding until the usable ceiling rises above it (toward the "
-              f"{_fmt_clock(reset_ts)} reset) or the window refreshes…")
-        try:
-            while True:
-                now = time.time()
-                if now >= reset_ts:
-                    print("  ▶ Session window reset — continuing with a fresh window.")
-                    # Fresh budget: the cached high reading is now stale.
-                    self.invalidate_cache()
-                    return True, time.time()
-                limit = dynamic_usage_limit(base, reset_ts, now)
-                if usage.percent < limit:
-                    print(f"  ▶ Usable ceiling risen to {limit:.0f}% "
-                          f"(now {_fmt_clock(now)}) — resuming within this window.")
-                    # Working will push usage up again; force a fresh reading next
-                    # check so the next decision is based on real, current usage.
-                    self.invalidate_cache()
-                    return True, session_start
-                remaining = reset_ts - now
-                mins = int(remaining // 60) + 1
-                print(f"    … usage {usage.percent:.0f}% ≥ ceiling {limit:.0f}%; "
-                      f"~{mins} min to reset (now {_fmt_clock(now)})", flush=True)
-                time.sleep(min(remaining, 60))
-        except KeyboardInterrupt:
-            print("\nWait interrupted by user (Ctrl+C).")
-            sys.exit(130)
 
 
 class ClaudeCommand(NamedTuple):
@@ -1124,8 +789,10 @@ class Driver:
         both default to None and are then derived from the invoked script's
         filename (runTranslate.py -> "runTranslate" / "runTranslate.py"), so a
         typical wrapper need not set them at all; ``description`` (the --help
-        description) is free prose, so set it if you want one. Override any of
-        them on your subclass to pin an explicit value.
+        description) is free prose, so set it if you want one; ``limit_policy``
+        (a limits.LimitPolicy) picks the usage-limit specialisation, defaulting
+        to a day/night session rule when unset. Override any of them on your
+        subclass to pin an explicit value.
       * methods for behaviour — ``next_command()``, ``model()``, ``on_success()``,
         ``final_summary()``. Override the ones you need; the rest keep their
         default.
@@ -1151,6 +818,16 @@ class Driver:
     app_name: Optional[str] = None      # names the rotating mirror log file
     prog: Optional[str] = None          # --help program name
     description: Optional[str] = None   # --help description (None = generic)
+
+    # --- usage-limit specialisation (declarative, like the labels above) ------
+    # A limits.LimitPolicy picking which /usage quota(s) to gate on and at what
+    # ceiling; None => the engine's default (a day/night session rule, see
+    # limits.default_policy). Set it as a class attribute to specialise, e.g.
+    #   limit_policy = LimitPolicy([SessionLimit(80)])            # flat session
+    #   limit_policy = LimitPolicy([WeeklyLimit(90)])             # weekly cap
+    #   limit_policy = LimitPolicy([DayNightLimit(), WeeklyLimit(90)])  # composite
+    # LimitPolicy/rules are stateless, so a shared default instance is safe here.
+    limit_policy = None
 
     @classmethod
     def resolved_app_name(cls) -> str:
@@ -1219,11 +896,17 @@ def run_loop(driver: Driver, args: argparse.Namespace,
     `driver.next_command()`, and the closing "Final state" line became
     `driver.final_summary()`.
     """
+    # The usage-limit query/parse (UsageSource) and pausing policy (LimitPolicy)
+    # live in their own modules; imported here to avoid an import cycle
+    # (limits/usage import cyclecore for its helpers).
+    from . import limits
+    from .usage import UsageSource
+
     max_iters = args.max          # None = no limit
     # When a finite iteration cap is given (-m/--max) the run is short and
-    # bounded on purpose, so the usage-limit machinery (the NIGHT_USAGE_LIMIT /
-    # DAY_USAGE_LIMIT / USAGE_RATE_PER_MIN pause-on-limit logic) is skipped — we
-    # just run the requested iterations without ever waiting out a window.
+    # bounded on purpose, so the usage-limit machinery (the LimitPolicy
+    # pause-on-limit logic) is skipped — we just run the requested iterations
+    # without ever waiting out a window.
     ignore_usage_limits = max_iters is not None
     dry_run = args.dry_run
     raw = args.raw
@@ -1258,14 +941,15 @@ def run_loop(driver: Driver, args: argparse.Namespace,
 
     session_start = time.time()   # start of the current 5-hour session window
     consecutive_errors = 0        # reset to 0 after any successful iteration
-    usage_computer = UsageComputer()  # queries/caches /usage and pauses on limit
+    usage_source = UsageSource()  # queries/caches `claude -p "/usage"`
+    limit_policy = driver.limit_policy or limits.default_policy()  # pauses on limit
     last_git_push = 0.0           # epoch time of the last `git push` (0 = never)
     print(f"  · git push policy: {git_push_policy.value}")
 
-    # Bookend the run with a usage snapshot (session + weekly limit) so each run
-    # records where it started; the matching end-of-run snapshot is logged below.
+    # Bookend the run with a usage snapshot (the policy's watched quotas) so each
+    # run records where it started; the matching end-of-run snapshot is below.
     if not dry_run:
-        usage_computer.log_usage_snapshot("at start (iteration 1)")
+        limit_policy.log_snapshot(usage_source, "at start (iteration 1)")
 
     iteration = 0
     while True:
@@ -1304,7 +988,7 @@ def run_loop(driver: Driver, args: argparse.Namespace,
         # and pause cleanly between iterations if it is already at/over the
         # threshold, instead of running an iteration that would hit the wall.
         if not dry_run and not ignore_usage_limits:
-            paused, session_start = usage_computer.check_usage_and_maybe_wait(session_start)
+            paused, session_start = limit_policy.check_and_wait(usage_source, session_start)
             if paused:
                 consecutive_errors = 0  # fresh window — start counting errors anew
 
@@ -1355,8 +1039,8 @@ def run_loop(driver: Driver, args: argparse.Namespace,
                     f"(error #{consecutive_errors} in a row).")
 
         if not ignore_usage_limits:
-            paused, session_start = usage_computer.check_usage_and_maybe_wait(
-                session_start, note=" (checked after error)")
+            paused, session_start = limit_policy.check_and_wait(
+                usage_source, session_start, note=" (checked after error)")
             if paused:
                 consecutive_errors = 0  # fresh window — start counting errors anew
                 continue
@@ -1384,13 +1068,13 @@ def run_loop(driver: Driver, args: argparse.Namespace,
         else:
             print("  · final git push: nothing to push.")
 
-    # End-of-run usage snapshot (session + weekly limit), mirroring the one
+    # End-of-run usage snapshot (the policy's watched quotas), mirroring the one
     # logged before iteration 1 — so each run records where it finished. Forced
     # fresh (cache_value=False) so it reflects the true post-run state rather
     # than a possibly-recent cached reading from the last limit check.
     if not dry_run:
-        usage_computer.log_usage_snapshot("at end (after last cycle)",
-                                          cache_value=False)
+        limit_policy.log_snapshot(usage_source, "at end (after last cycle)",
+                                  cache_value=False)
 
     # Closing line, if the driver has one (e.g. "Final state: …").
     summary = driver.final_summary()

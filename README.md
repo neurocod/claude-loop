@@ -67,8 +67,10 @@ default, or `--project-dir`/`-C`.
 
 ```
 claude_loop/
-  cyclecore.py   engine: parse_args, run_loop, the Driver protocol, usage limits,
+  cyclecore.py   engine: parse_args, run_loop, the Driver protocol,
                  git-push policy, mirror log, stream-json rendering
+  usage.py       UsageSource: query / cache / parse `claude -p "/usage"`
+  limits.py      LimitPolicy + SessionLimit / DayNightLimit / WeeklyLimit rules
   drivers.py     StateFileDriver (state machine) and ListFileDriver (work queue)
   parallel.py    run_parallel: N concurrent claude workers over a list file
 examples/
@@ -155,6 +157,36 @@ class FileListParallelDriver(FileListDriver):
 if __name__ == "__main__":
     FileListParallelDriver.main_parallel()
 ```
+
+## Usage limits
+
+Before each iteration (and after any failed one) the loop consults
+`claude -p "/usage"` and pauses if a watched quota is at/over its ceiling. Which
+quota, and at what ceiling, is a *specialisation* you pick by setting the
+`limit_policy` class attribute on your Driver — a `LimitPolicy` holding one or
+more rules; the loop pauses while **any** of them is exceeded:
+
+```python
+from claude_loop import (LimitPolicy, SessionLimit, DayNightLimit, WeeklyLimit)
+
+class MyDriver(StateFileDriver):
+    # pick ONE of these:
+    limit_policy = LimitPolicy([SessionLimit(80)])                  # flat session cap
+    limit_policy = LimitPolicy([DayNightLimit()])                   # smart session (default)
+    limit_policy = LimitPolicy([WeeklyLimit(90)])                   # weekly cap
+    limit_policy = LimitPolicy([DayNightLimit(), WeeklyLimit(90)])  # composite
+```
+
+| Rule | Watches | Ceiling behaviour |
+|---|---|---|
+| `SessionLimit(limit)` | the ~5-hour session | flat `limit`%, wait out the window |
+| `DayNightLimit(day=, night=, deadline_hour=)` | the session | day/night base + a climb toward 100% as the window nears its reset |
+| `WeeklyLimit(limit, sonnet_only=)` | the weekly quota | flat `limit`%, wait out the week |
+
+Leaving `limit_policy` unset uses `LimitPolicy([DayNightLimit()])`. The bookend
+usage snapshots and the per-check status lines report exactly the quotas the
+active policy watches. When `--max N` is given (a short bounded run) the limit
+gate is skipped entirely.
 
 ## Common options
 
